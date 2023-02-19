@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if verbose {
         println!("\n------------ Runtime settings ------------");
-        println!("Using {} bits ({}) of RAM as detector", 8 * size, mem_size((8 * size) as u64));
+        println!("Using {} bits ({}) of RAM as detector", size, mem_size(size as u64));
 
         if check_delay == 0 {
             println!("Will do continuous integrity checks");
