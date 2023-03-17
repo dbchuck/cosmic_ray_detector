@@ -4,25 +4,99 @@ use std::io::{stdout, Write};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use clap::Parser;
-
 mod config;
 mod detector;
 
 use crate::{config::Args, detector::Detector};
 
+use clap::Parser;
+use sysinfo::{RefreshKind, System, SystemExt};
+
+const SWAP_DELTA_THRESHOLD: u64 = 10_000_000; // 10MB
+const FREE_MEM_THRESHOLD: u64 = 50_000_000; // 50MB
+
 fn main() -> Result<(), Box<dyn Error>> {
     let conf: Args = Args::parse();
 
-    let size: usize = conf.memory_to_occupy.get();
+    let mut size: usize = conf.memory_to_occupy;
     let verbose: bool = conf.verbose;
-    let parallel: bool = conf.parallel;
     let check_delay: u64 = conf.delay_between_checks;
 
     let sleep_duration: Duration = Duration::from_millis(check_delay);
 
+    let rk = RefreshKind::new().with_memory();
+    let mut sys_info = System::new_with_specifics(rk);
+    let previous_swap_usage = sys_info.used_swap();
+    let mut increment;
+    let mut total_size= size;
+
     if verbose {
         println!("\n------------ Runtime settings ------------");
+        if size == 0 {
+            println!("Using all available RAM as detector");
+            // Calculate 1/2 of the available memory
+            // Evaluate how much is left after attempting to use all the memory. Check if any swap has been used
+            // If swap has been used, decrement by 1/2 of the original amount
+            // If swap has not been used, increase by 1/2 of the previous amount until the amount is less than 10MB increments
+
+            let mut init_detectors = vec![];
+            // Start at 1/2 of available memory
+            size = (sys_info.available_memory() / 2) as usize;
+            total_size = size;
+            increment = size;
+            print_detector_stats(&sys_info, size);
+            let mut detector = Detector::new(0, size);
+            detector.write(42);
+            init_detectors.insert(0, detector);
+            loop {
+                sys_info.refresh_specifics(rk);
+                increment = increment / 2;
+                if sys_info.total_swap() > 0 {
+                    // If there is swap
+                    if sys_info.used_swap() - previous_swap_usage > SWAP_DELTA_THRESHOLD {
+                        // Swap increased, decrease amount of memory used
+                        // Remove previous detector
+                        init_detectors.remove(0);
+                        total_size -= size;
+                    }
+                    else {
+                        if FREE_MEM_THRESHOLD > increment as u64 {
+                            break;
+                        }
+                        // Swap usage did not increase, increase amount of memory to use
+                    }
+
+                    size = size - increment;
+                    total_size += size;
+                }
+                else {
+                    // No swap
+                    if 0 > (sys_info.available_memory() as i64 - FREE_MEM_THRESHOLD as i64) as i64 {
+                        // Passed free memory threshold, reduce memory consumption
+                        // Remove previous detector
+                        init_detectors.remove(0);
+                        total_size -= size;
+                    }
+                    else {
+                        // Only increase until there is 50MB spare
+                        if FREE_MEM_THRESHOLD > increment as u64 {
+                            break;
+                        }
+                    }
+
+                    size = size - increment;
+                    total_size += size;
+                }
+
+                print_detector_stats(&sys_info, size);
+
+                let mut detector = Detector::new(0, size);
+                detector.write(42);
+                init_detectors.insert(0, detector);
+            }
+
+            size = total_size;
+        }
         println!("Using {} bits ({}) of RAM as detector", size, mem_size(size as u64));
 
         if check_delay == 0 {
@@ -30,18 +104,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         } else {
             println!("Waiting {:?} between integrity checks", sleep_duration);
         }
-        if parallel {
-            println!("Checking memory integrity in parallel");
-        }
+        println!("Checking memory integrity in parallel");
         println!("------------------------------------------\n");
 
         print!("Allocating detector memory...");
         stdout().flush()?;
     }
 
+
+
     // Instead of building a detector out of scintillators and photo multiplier tubes,
     // we just allocate some memory on this here computer.
-    let mut detector = Detector::new(parallel, 0, size);
+    let mut detector = Detector::new(0, size);
     // Less exciting, much less accurate and sensitive, but much cheaper
 
     // Avoid the pitfalls of virtual memory by writing nonzero values to the allocated memory.
@@ -80,6 +154,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut everything_is_fine: bool;
     let start: Instant = Instant::now();
     loop {
+        // TODO have a thread watching to see if the free memory buffer begins to decrease (in which case, shrink the detector) instead of relying on swap.
+
         // Reset detector!
         if verbose {
             print!("Zeroing detector memory... ");
@@ -144,6 +220,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         checks_since_last_bitflip = 0;
     }
+}
+
+fn print_detector_stats(sys_info: &System, size: usize) {
+    println!("Total: {} Free: {} Available: {} Used: {} Total-Used: {}", sys_info.total_memory(), sys_info.free_memory(), sys_info.available_memory(), sys_info.used_memory(), sys_info.total_memory() - sys_info.used_memory());
+    println!("Total: {} Free: {} Available: {} Used: {} Total-Used: {}", mem_size(sys_info.total_memory()), mem_size(sys_info.free_memory()), mem_size(sys_info.available_memory()), mem_size(sys_info.used_memory()), mem_size(sys_info.total_memory() - sys_info.used_memory()));
+    println!("Creating next detector of size {} ({})", size, mem_size(size as u64));
 }
 
 /// Get human readable byte sizes
